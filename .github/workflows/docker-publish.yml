@@ -8,20 +8,23 @@ on:
   release:
     types: [published]
 
-  # Run tests for any PRs.
   pull_request:
-
-env:
-  IMAGE_NAME: molecule-arch
+  
+  workflow_dispatch:
 
 jobs:
-  # Run tests.
-  # See also https://docs.docker.com/docker-hub/builds/automated-testing/
   test:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - name: Dynamically find the image name
+        id: get-image-name
+        run: |
+          image_name=$(echo $GITHUB_REPOSITORY | cut -d '/' -f2 | sed -r 's/docker-//')
+          echo "::set-output name=image_name::$image_name"
+        
+      - name: Checkout source code
+        uses: actions/checkout@v2
 
       - name: Run tests
         run: |
@@ -29,13 +32,24 @@ jobs:
             docker-compose --file docker-compose.test.yml build
             docker-compose --file docker-compose.test.yml run sut
           else
-            docker build . --file Dockerfile
+            docker build . --file Dockerfile --tag ${{ steps.get-image-name.outputs.image_name }}
           fi
+          
+      - name: Run the Anchore scan action itself with GitHub Advanced Security code scanning integration enabled
+        uses: anchore/scan-action@v3
+        id: scan
+        with:
+          image: "${{ steps.get-image-name.outputs.image_name }}"
+          acs-report-enable: true
+          fail-build: false
+          severity-cutoff: high
+          
+      - name: Upload Anchore Scan Report
+        uses: github/codeql-action/upload-sarif@v1
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
 
-  # Push image to GitHub Packages.
-  # See also https://docs.docker.com/docker-hub/builds/
   push:
-    # Ensure test job passes before pushing image.
     needs: test
 
     runs-on: ubuntu-latest
@@ -46,17 +60,24 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v2
+      - name: Dynamically find the image name
+        id: get-image-name
+        run: |
+          image_name=$(echo $GITHUB_REPOSITORY | cut -d '/' -f2 | sed -r 's/docker-//')
+          echo "::set-output name=image_name::$image_name"
+          
+      - name: Checkout source code
+        uses: actions/checkout@v2
 
       - name: Build image
-        run: docker build . --file Dockerfile --tag $IMAGE_NAME
+        run: docker build . --file Dockerfile --tag ${{ steps.get-image-name.outputs.image_name }}
 
       - name: Log into registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Push image
         run: |
-          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
+          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/${{ steps.get-image-name.outputs.image_name }}
 
           # Change all uppercase to lowercase
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
@@ -73,5 +94,5 @@ jobs:
           echo IMAGE_ID=$IMAGE_ID
           echo VERSION=$VERSION
 
-          docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
+          docker tag ${{ steps.get-image-name.outputs.image_name }} $IMAGE_ID:$VERSION
           docker push $IMAGE_ID:$VERSION
